@@ -29,7 +29,8 @@ public sealed class RunController : IRunController
     {
         if (State.Phase != GamePhase.LevelComplete) return;
         var next = Math.Min(GameBalance.MaxLevel, State.CurrentLevel + 1);
-        State = CreateLevel(next, State.RunBits, State.Multiplier);
+        State = CreateLevel(next, State.RunBits, State.Multiplier,
+            Math.Max(0, State.AutoCompleteCooldownLevels - 1));
     }
 
     public void StartNewRun(int startingLevel = 1, decimal bits = 0m)
@@ -92,8 +93,13 @@ public sealed class RunController : IRunController
 
     public bool TryAutoComplete()
     {
-        if (State.Phase != GamePhase.WaitingForInput || upgrades.Levels.GetValueOrDefault(UpgradeId.AutoComplete) <= 0 || State.AutoCompleteCooldownLevels > 0) return false;
+        if (State.Phase != GamePhase.WaitingForInput || State.AutoCompleteCharges <= 0 || State.AutoCompleteCooldownLevels > 0) return false;
         var count = upgrades.Levels.GetValueOrDefault(UpgradeId.AutoComplete);
+        State = State with
+        {
+            AutoCompleteCharges = State.AutoCompleteCharges - 1,
+            AutoCompleteCooldownLevels = Math.Max(1, GameBalance.DefaultAutoCooldownLevels - upgrades.Levels.GetValueOrDefault(UpgradeId.AutoCooldown))
+        };
         for (var i = 0; i < count && State.Phase is GamePhase.WaitingForInput or GamePhase.Breakpoint; i++)
         {
             if (State.Phase == GamePhase.Breakpoint) FinishBreakpoint();
@@ -137,13 +143,13 @@ public sealed class RunController : IRunController
             CurrentHp = hp, RegeneratedThisLevel = regenerated };
     }
 
-    private RunState CreateLevel(int level, decimal bits, double multiplier) => new()
+    private RunState CreateLevel(int level, decimal bits, double multiplier, int cooldownLevels = 0) => new()
     {
         CurrentLevel = level, CurrentSet = 0, Sets = generator.Generate(level, debugSeed), InputIndex = 0,
         CurrentHp = health.MaxHp(upgrades.Levels.GetValueOrDefault(UpgradeId.Hp)), MaxHp = health.MaxHp(upgrades.Levels.GetValueOrDefault(UpgradeId.Hp)),
         InputSecondsRemaining = GameBalance.DefaultInputSeconds + upgrades.Levels.GetValueOrDefault(UpgradeId.InputTime), MemorySecondsRemaining = 0,
         Multiplier = multiplier, ConsecutiveSets = 0, RunBits = bits, Phase = GamePhase.Preparing,
-        ShowUsesRemaining = upgrades.Levels.GetValueOrDefault(UpgradeId.Show), AutoCompleteCooldownLevels = 0,
+        ShowUsesRemaining = upgrades.Levels.GetValueOrDefault(UpgradeId.Show), AutoCompleteCooldownLevels = cooldownLevels,
         AutoCompleteCharges = upgrades.Levels.GetValueOrDefault(UpgradeId.AutoComplete), PatternRevealed = true, RegeneratedThisLevel = false
     };
 }

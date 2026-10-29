@@ -110,6 +110,47 @@ public sealed class CoreLogicTests
         Assert.Equal(0, controller.State.CurrentHp);
     }
 
+    [Fact]
+    public void AutoComplete_ConsumesOneChargeAndAppliesCooldown()
+    {
+        var levels = Enum.GetValues<UpgradeId>().ToDictionary(id => id, _ => 0);
+        levels[UpgradeId.AutoComplete] = 2;
+        var controller = new RunController(new PatternGenerator(), new PatternValidator(), new HealthSystem(), new ScoreCalculator(), new UpgradeSystem(new StoreCatalog(), levels), debugSeed: 9);
+        controller.Update(TimeSpan.FromSeconds(.1));
+        controller.Update(TimeSpan.FromSeconds(4));
+
+        Assert.True(controller.TryAutoComplete());
+        Assert.Equal(1, controller.State.AutoCompleteCharges);
+        Assert.Equal(GameBalance.DefaultAutoCooldownLevels, controller.State.AutoCompleteCooldownLevels);
+        Assert.False(controller.TryAutoComplete());
+    }
+
+    [Fact]
+    public void AutoCooldown_DecrementsWhenAdvancingToNextLevel()
+    {
+        var levels = Enum.GetValues<UpgradeId>().ToDictionary(id => id, _ => 0);
+        levels[UpgradeId.AutoComplete] = 1;
+        var controller = new RunController(new PatternGenerator(), new PatternValidator(), new HealthSystem(), new ScoreCalculator(), new UpgradeSystem(new StoreCatalog(), levels), debugSeed: 9);
+        controller.Update(TimeSpan.FromSeconds(.1));
+        controller.Update(TimeSpan.FromSeconds(4));
+        Assert.True(controller.TryAutoComplete());
+
+        // Finish the remaining input normally; this also verifies Auto-Complete did not
+        // silently complete more sets than its configured charge.
+        while (controller.State.Phase != GamePhase.LevelComplete)
+        {
+            if (controller.State.Phase == GamePhase.Breakpoint) controller.Update(TimeSpan.FromSeconds(3));
+            else if (controller.State.Phase == GamePhase.WaitingForInput)
+            {
+                foreach (var color in controller.State.Sets[controller.State.CurrentSet].Colors.Skip(controller.State.InputIndex)) controller.Submit(new(color));
+            }
+            else controller.Update(TimeSpan.FromSeconds(1));
+        }
+
+        controller.StartNextLevel();
+        Assert.Equal(GameBalance.DefaultAutoCooldownLevels - 1, controller.State.AutoCompleteCooldownLevels);
+    }
+
     private static RunState State(GamePhase phase) => new()
     {
         CurrentLevel = 1, CurrentSet = 0, Sets = [new PatternSet(ColorId.Color0, ColorId.Color1, ColorId.Color2, ColorId.Color3)],
