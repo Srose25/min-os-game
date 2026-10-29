@@ -3,6 +3,7 @@ using MinOS.Gameplay;
 using MinOS.Input;
 using MinOS.Persistence;
 using MinOS.Store;
+using MinOS.Rendering;
 using Xunit;
 
 namespace MinOS.Tests;
@@ -108,6 +109,35 @@ public sealed class CoreLogicTests
         controller.Submit(new(wrong));
         Assert.Equal(GamePhase.GameOver, controller.State.Phase);
         Assert.Equal(0, controller.State.CurrentHp);
+    }
+
+    [Fact]
+    public void PatternLayout_CentersEachRowAndWrapsAtThreeSets()
+    {
+        var bounds = PatternLayout.SetBounds(6, 960, 70);
+        Assert.Equal(6, bounds.Count);
+        Assert.Equal(bounds[0].X, bounds[3].X);
+        Assert.Equal((960 - (3 * PatternLayout.SetWidth + 2 * PatternLayout.SetGap)) / 2, bounds[0].X);
+        var oneRow = PatternLayout.SetBounds(1, 960, 70);
+        Assert.Equal((960 - PatternLayout.SetWidth) / 2, oneRow[0].X);
+    }
+
+    [Fact]
+    public void SaveRepository_PreservesActiveRunAndIndependentUpgradeData()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "min-os-active-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var repository = new SaveGameRepository(directory);
+            var state = State(GamePhase.WaitingForInput) with { CurrentLevel = 4, RunBits = 6.5m };
+            repository.Save(1, new SaveSlotData { BankedBits = 6.5m, ActiveRun = state, UpgradeLevels = new() { [UpgradeId.Hp] = 2 } });
+            repository.Save(2, new SaveSlotData { BankedBits = 1m, UpgradeLevels = new() { [UpgradeId.Hp] = 0 } });
+            var slotA = repository.Load(1)!; var slotB = repository.Load(2)!;
+            Assert.Equal(4, slotA.ActiveRun!.CurrentLevel);
+            Assert.Equal(2, slotA.UpgradeLevels[UpgradeId.Hp]);
+            Assert.Equal(0, slotB.UpgradeLevels[UpgradeId.Hp]);
+        }
+        finally { if (Directory.Exists(directory)) Directory.Delete(directory, true); }
     }
 
     [Fact]
