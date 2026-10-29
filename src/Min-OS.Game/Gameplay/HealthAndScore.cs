@@ -10,7 +10,9 @@ public sealed class HealthSystem : IHealthSystem
     {
         // Version 0 permits no more than one regeneration event per level.
         if (regeneratedThisLevel || completedSets <= 0) return false;
-        var requiredSets = Math.Max(1, setsInLevel - Math.Max(0, regenUpgrade));
+        // Ten purchases must reach the one-set threshold at every level; interpolate the
+        // threshold so QA can validate levels 1, 5, 10, and 15 without a special case.
+        var requiredSets = Math.Max(1, (int)Math.Ceiling(setsInLevel * (10d - Math.Clamp(regenUpgrade, 0, 10)) / 10d));
         return completedSets >= requiredSets;
     }
     public int Regenerate(int currentHp, int maxHp) => Math.Min(maxHp, currentHp + 1);

@@ -9,4 +9,10 @@
 #-------------------------------- References --------------------------------#
 
 #---------------------------------- Content ---------------------------------#
-# Engineer: add bundled fonts, nine color SFX, and button art here as assets arrive.
+# Arial is intentionally the version 0 font. The MonoGame processor resolves it from
+# the Windows font installation at build time; QA should verify this remains available
+# on the developer machine before packaging.
+#begin Arial.spritefont
+/importer:FontDescriptionImporter
+/processor:FontDescriptionProcessor
+/build:Arial.spritefont

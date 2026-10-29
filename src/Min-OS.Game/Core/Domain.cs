@@ -27,6 +27,9 @@ public sealed record RunState
     public required GamePhase Phase { get; init; }
     public required int ShowUsesRemaining { get; init; }
     public required int AutoCompleteCooldownLevels { get; init; }
+    public int AutoCompleteCharges { get; init; }
+    public bool PatternRevealed { get; init; }
+    public bool RegeneratedThisLevel { get; init; }
 }
 
 public sealed record SettingsData
