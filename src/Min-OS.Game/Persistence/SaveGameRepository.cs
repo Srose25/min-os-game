@@ -30,6 +30,8 @@ public sealed class SaveGameRepository : ISaveGameRepository
     }
 
     public void Delete(int slot) { ValidateSlot(slot); var path = PathFor(slot); if (File.Exists(path)) File.Delete(path); }
+    // QA sprint 2: callers use this before Load so empty and corrupt slots can be shown differently.
+    public bool Exists(int slot) { ValidateSlot(slot); return File.Exists(PathFor(slot)); }
     private string PathFor(int slot) => Path.Combine(directory, $"save-{slot}.json");
     private static SaveSlotData? Corrupt(string path) { File.Delete(path); return null; }
     private static void ValidateSlot(int slot)

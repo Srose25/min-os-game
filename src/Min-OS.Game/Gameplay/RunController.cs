@@ -16,11 +16,11 @@ public sealed class RunController : IRunController
     public RunState State { get; private set; }
 
     public RunController(IPatternGenerator generator, IPatternValidator validator, IHealthSystem health,
-        IScoreCalculator score, IUpgradeSystem upgrades, int startingLevel = 1, int? debugSeed = null)
+        IScoreCalculator score, IUpgradeSystem upgrades, int startingLevel = 1, int? debugSeed = null, RunState? initialState = null)
     {
         this.generator = generator; this.validator = validator; this.health = health;
         this.score = score; this.upgrades = upgrades; this.debugSeed = debugSeed;
-        State = CreateLevel(Math.Clamp(startingLevel, 1, GameBalance.MaxLevel), 0m, GameBalance.InitialMultiplier);
+        State = initialState ?? CreateLevel(Math.Clamp(startingLevel, 1, GameBalance.MaxLevel), 0m, GameBalance.InitialMultiplier);
     }
 
     public void SetPaused(bool value) => paused = value;
@@ -38,6 +38,8 @@ public sealed class RunController : IRunController
         State = CreateLevel(Math.Clamp(startingLevel, 1, GameBalance.MaxLevel), bits, GameBalance.InitialMultiplier);
         paused = false;
     }
+
+    public void LoadState(RunState state) => State = state;
 
     public bool TrySpendBits(decimal amount)
     {
