@@ -30,6 +30,8 @@ public sealed record RunState
     public int AutoCompleteCharges { get; init; }
     public bool PatternRevealed { get; init; }
     public bool RegeneratedThisLevel { get; init; }
+    // QA sprint 3: rendering uses this immutable snapshot to show accepted colors only.
+    public IReadOnlyList<ColorId> AcceptedPrefix { get; init; } = [];
 }
 
 public sealed record SettingsData

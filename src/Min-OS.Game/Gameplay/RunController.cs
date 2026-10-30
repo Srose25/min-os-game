@@ -14,6 +14,7 @@ public sealed class RunController : IRunController
     private bool paused;
 
     public RunState State { get; private set; }
+    public decimal LastLevelReward { get; private set; }
 
     public RunController(IPatternGenerator generator, IPatternValidator validator, IHealthSystem health,
         IScoreCalculator score, IUpgradeSystem upgrades, int startingLevel = 1, int? debugSeed = null, RunState? initialState = null)
@@ -28,6 +29,7 @@ public sealed class RunController : IRunController
     public void StartNextLevel()
     {
         if (State.Phase != GamePhase.LevelComplete) return;
+        LastLevelReward = 0;
         var next = Math.Min(GameBalance.MaxLevel, State.CurrentLevel + 1);
         State = CreateLevel(next, State.RunBits, State.Multiplier,
             Math.Max(0, State.AutoCompleteCooldownLevels - 1));
@@ -35,6 +37,7 @@ public sealed class RunController : IRunController
 
     public void StartNewRun(int startingLevel = 1, decimal bits = 0m)
     {
+        LastLevelReward = 0;
         State = CreateLevel(Math.Clamp(startingLevel, 1, GameBalance.MaxLevel), bits, GameBalance.InitialMultiplier);
         paused = false;
     }
@@ -79,16 +82,19 @@ public sealed class RunController : IRunController
 
     public ValidationResult Submit(ColorInput input)
     {
+        // QA sprint 3: a breakpoint is an automatic handoff, so the first next-set
+        // input resolves it exactly once before validation instead of being ignored.
+        if (State.Phase == GamePhase.Breakpoint) FinishBreakpoint();
         var result = validator.Submit(State, input);
         if (result is ValidationResult.Ignored) return result;
         if (result is ValidationResult.Wrong)
         {
             var hp = health.ApplyMistake(State.CurrentHp);
-            State = State with { CurrentHp = hp, InputIndex = 0, Multiplier = GameBalance.InitialMultiplier, ConsecutiveSets = 0,
+            State = State with { CurrentHp = hp, InputIndex = 0, AcceptedPrefix = [], Multiplier = GameBalance.InitialMultiplier, ConsecutiveSets = 0,
                 Phase = hp == 0 ? GamePhase.GameOver : GamePhase.WaitingForInput };
             return result;
         }
-        if (result is ValidationResult.Correct) { State = State with { InputIndex = State.InputIndex + 1 }; return result; }
+        if (result is ValidationResult.Correct) { State = State with { InputIndex = State.InputIndex + 1, AcceptedPrefix = [.. State.AcceptedPrefix, input.Color] }; return result; }
         CompleteSet();
         return result;
     }
@@ -122,10 +128,11 @@ public sealed class RunController : IRunController
     {
         var nextMultiplier = score.MultiplierAfterSet(State.Multiplier);
         var nextCount = State.ConsecutiveSets + 1;
-        State = State with { InputIndex = 0, Multiplier = nextMultiplier, ConsecutiveSets = nextCount };
+        State = State with { InputIndex = 0, AcceptedPrefix = [], Multiplier = nextMultiplier, ConsecutiveSets = nextCount };
         if (State.CurrentSet == State.Sets.Count - 1)
         {
-            State = State with { Phase = GamePhase.LevelComplete, RunBits = State.RunBits + score.AwardedBits(State.CurrentLevel, State.Multiplier) };
+            LastLevelReward = score.AwardedBits(State.CurrentLevel, State.Multiplier);
+            State = State with { Phase = GamePhase.LevelComplete, RunBits = State.RunBits + LastLevelReward };
             return;
         }
         State = State with { Phase = GamePhase.Breakpoint, MemorySecondsRemaining = GameBalance.DefaultBreakpointSeconds };

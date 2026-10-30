@@ -4,6 +4,8 @@ using MinOS.Input;
 using MinOS.Persistence;
 using MinOS.Store;
 using MinOS.Rendering;
+using MinOS.Audio;
+using Microsoft.Xna.Framework.Input;
 using Xunit;
 
 namespace MinOS.Tests;
@@ -138,6 +140,63 @@ public sealed class CoreLogicTests
             Assert.Equal(0, slotB.UpgradeLevels[UpgradeId.Hp]);
         }
         finally { if (Directory.Exists(directory)) Directory.Delete(directory, true); }
+    }
+
+    [Fact]
+    public void InputDefaults_UsePhysicalNumpadAndNumericalNumberRow()
+    {
+        var bindings = MonoGameInputManager.DefaultBindings();
+        Assert.Equal(ColorId.Color0, bindings[Keys.NumPad7]);
+        Assert.Equal(ColorId.Color6, bindings[Keys.NumPad1]);
+        Assert.Equal(ColorId.Color0, bindings[Keys.D1]);
+        Assert.Equal(ColorId.Color8, bindings[Keys.D9]);
+    }
+
+    [Fact]
+    public void InputRemapping_RejectsConflictsAndExportsAcceptedBinding()
+    {
+        var input = new MonoGameInputManager();
+        Assert.False(input.TryRebind(ColorId.Color0, Keys.D2));
+        Assert.True(input.TryRebind(ColorId.Color0, Keys.F1));
+        Assert.Contains("F1", input.ExportBindings()[ColorId.Color0]);
+    }
+
+    [Fact]
+    public void RunController_BreakpointFreezesTimerAcceptsNextInputAndTracksPrefix()
+    {
+        var levels = Enum.GetValues<UpgradeId>().ToDictionary(id => id, _ => 0);
+        var controller = new RunController(new PatternGenerator(), new PatternValidator(), new HealthSystem(), new ScoreCalculator(), new UpgradeSystem(new StoreCatalog(), levels), startingLevel: 2, debugSeed: 3);
+        controller.Update(TimeSpan.FromSeconds(.1)); controller.Update(TimeSpan.FromSeconds(4));
+        foreach (var color in controller.State.Sets[0].Colors) controller.Submit(new(color));
+        var before = controller.State.InputSecondsRemaining;
+        Assert.Equal(GamePhase.Breakpoint, controller.State.Phase);
+        controller.Update(TimeSpan.FromSeconds(1));
+        Assert.Equal(before, controller.State.InputSecondsRemaining);
+        var next = controller.State.Sets[1].Colors[0];
+        controller.Submit(new(next));
+        Assert.Equal(1, controller.State.CurrentSet);
+        Assert.Equal([next], controller.State.AcceptedPrefix);
+        var wrong = next == ColorId.Color0 ? ColorId.Color1 : ColorId.Color0;
+        controller.Submit(new(wrong));
+        Assert.Empty(controller.State.AcceptedPrefix);
+    }
+
+    [Fact]
+    public void MemorySequencePlayer_EmitsRepeatedColorsInOrder()
+    {
+        var player = new MemorySequencePlayer();
+        player.Start([ColorId.Color0, ColorId.Color1, ColorId.Color1, ColorId.Color2], TimeSpan.FromSeconds(4));
+        var emitted = new List<ColorId>();
+        for (var i = 0; i < 4; i++) emitted.AddRange(player.Update(TimeSpan.FromSeconds(1)));
+        Assert.Equal([ColorId.Color0, ColorId.Color1, ColorId.Color1, ColorId.Color2], emitted);
+    }
+
+    [Fact]
+    public void StatisticsTracker_TracksCountersAndDoesNotReduceBitsForPurchases()
+    {
+        var tracker = new StatisticsTracker();
+        tracker.RecordInput(); tracker.RecordInput(); tracker.RecordSetCompleted(); tracker.RecordGameOver(); tracker.RecordLevel(3, 4.5m);
+        Assert.Equal(new StatisticsData { Inputs = 2, CompletedSets = 1, GameOvers = 1, HighestLevel = 3, TotalBitsEarned = 4.5m }, tracker.Data);
     }
 
     [Fact]

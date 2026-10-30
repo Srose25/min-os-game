@@ -19,6 +19,7 @@ public sealed class Game1 : Game
     private readonly ScreenManager screens = new();
     private readonly MonoGameInputManager input = new();
     private readonly AudioManager audio = new();
+    private readonly MemorySequencePlayer memorySequence = new();
     private readonly RunController run;
     private readonly UpgradeSystem upgrades;
     private readonly Dictionary<UpgradeId, int> upgradeLevels;
@@ -32,6 +33,12 @@ public sealed class Game1 : Game
     private SpriteFont? font;
     private bool paused;
     private GamePhase lastPhase = GamePhase.Preparing;
+    private ColorId? highlightedButton;
+    private double highlightSeconds;
+    private ColorId? captureColor;
+    private SettingsData settings = new();
+    private StatisticsTracker statistics = new();
+    private bool gameOverCounted;
     private static readonly Color[] Palette =
     [ new(174, 0, 255), new(255, 0, 255), new(0, 0, 255), new(0, 255, 255),
       new(0, 255, 0), new(255, 255, 0), new(255, 115, 0), Color.White, new(128, 128, 128) ];
@@ -57,17 +64,21 @@ public sealed class Game1 : Game
     {
         if (GamePad.GetState(PlayerIndex.One).Buttons.Back == ButtonState.Pressed) Exit();
         input.Poll(); HandleGlobalInput(); HandleScreenClick();
+        HandleSettingsCapture();
+        if (screens.ActiveScreen == "Game" && !paused) HandleGameActions();
         if (screens.ActiveScreen == "Game" && !paused)
         {
             run.Update(gameTime.ElapsedGameTime);
-            foreach (var color in input.ReadColorEdges()) { if (run.Submit(color) != ValidationResult.Ignored) audio.PlayColor(color.Color); }
+            foreach (var color in input.ReadColorEdges()) SubmitGameplayInput(color);
             var mouseColor = input.ReadMouseColorEdge(GraphicsDevice.Viewport.Width, PadTop());
-            if (mouseColor.HasValue) { if (run.Submit(mouseColor.Value) != ValidationResult.Ignored) audio.PlayColor(mouseColor.Value.Color); }
+            if (mouseColor.HasValue) SubmitGameplayInput(mouseColor.Value);
             if (run.State.Phase == GamePhase.ShowingPattern && lastPhase != GamePhase.ShowingPattern)
-                foreach (var set in run.State.Sets) foreach (var color in set.Colors) audio.PlayColor(color);
+                memorySequence.Start(run.State.Sets.SelectMany(set => set.Colors), TimeSpan.FromSeconds(Math.Max(GameBalance.DefaultMemorySeconds, run.State.Sets.Count * GameBalance.ColorsPerSet * .05)));
+            foreach (var color in memorySequence.Update(gameTime.ElapsedGameTime)) audio.PlayColor(color);
+            if (highlightSeconds > 0) highlightSeconds -= gameTime.ElapsedGameTime.TotalSeconds; else highlightedButton = null;
             lastPhase = run.State.Phase;
-            if (run.State.Phase == GamePhase.GameOver) { SaveCurrentRun(); screens.Show("GameOver"); paused = false; }
-            else if (run.State.Phase == GamePhase.LevelComplete) { SaveCurrentRun(); screens.Show("Store"); }
+            if (run.State.Phase == GamePhase.GameOver) { if (!gameOverCounted) { statistics.RecordGameOver(); gameOverCounted = true; } SaveCurrentRun(); screens.Show("GameOver"); paused = false; }
+            else if (run.State.Phase == GamePhase.LevelComplete) { statistics.RecordLevel(run.State.CurrentLevel, run.LastLevelReward); SaveCurrentRun(); screens.Show("Store"); }
         }
         base.Update(gameTime);
     }
@@ -77,6 +88,42 @@ public sealed class Game1 : Game
         if (!input.PausePressed) return;
         if (screens.ActiveScreen == "Game") { paused = true; run.SetPaused(true); screens.Show("Pause"); }
         else if (screens.ActiveScreen == "Pause") { paused = false; run.SetPaused(false); screens.Show("Game"); }
+    }
+
+    private void SubmitGameplayInput(ColorInput inputValue)
+    {
+        if (run.State.Phase is not (GamePhase.WaitingForInput or GamePhase.Breakpoint)) return;
+        statistics.RecordInput();
+        highlightedButton = inputValue.Color; highlightSeconds = .18;
+        var result = run.Submit(inputValue);
+        if (result is ValidationResult.SetCompleted or ValidationResult.LevelCompleted)
+            statistics.RecordSetCompleted();
+        if (result != ValidationResult.Ignored) audio.PlayColor(inputValue.Color);
+    }
+
+    private void HandleGameActions()
+    {
+        // QA sprint 3: controls are visible below the keypad and also have keyboard shortcuts.
+        var keys = input.ReadKeyEdges();
+        if (keys.Contains(Keys.A)) UseAutoComplete();
+        if (keys.Contains(Keys.S)) UseShow();
+    }
+
+    private void UseAutoComplete()
+    {
+        var before = run.State.ConsecutiveSets;
+        if (run.TryAutoComplete()) for (var i = before; i < run.State.ConsecutiveSets; i++) statistics.RecordSetCompleted();
+    }
+
+    private void UseShow() => run.TryShow();
+
+    private void HandleSettingsCapture()
+    {
+        if (screens.ActiveScreen != "Settings" || captureColor is not ColorId color) return;
+        var key = input.ReadKeyEdges().FirstOrDefault();
+        if (key == Keys.None) return;
+        if (!input.TryRebind(color, key)) saveMessage = $"Conflict: {key} is already assigned.";
+        else { settings = settings with { Bindings = input.ExportBindings() }; saveMessage = $"Color {(int)color + 1} bound to {key}."; SaveCurrentRun(); captureColor = null; }
     }
 
     private void HandleScreenClick()
@@ -89,6 +136,9 @@ public sealed class Game1 : Game
                 if (Hit(point, 220)) { RefreshSaveSlots(); screens.Show("SaveSlots"); } else if (Hit(point, 290)) screens.Show("Settings");
                 else if (Hit(point, 360)) screens.Show("Leaderboard"); else if (Hit(point, 430)) Exit(); break;
             case "Settings":
+                if (Hit(point, 550)) { settings = settings with { Bindings = input.ExportBindings() }; SaveCurrentRun(); screens.Show("StartMenu"); }
+                else if (point.Y >= 100 && point.Y < 424) captureColor = (ColorId)((point.Y - 100) / 36);
+                break;
             case "Leaderboard": if (Hit(point, 550)) screens.Show("StartMenu"); break;
             case "SaveSlots": HandleSaveSlotClick(point); break;
             case "Pause":
@@ -96,9 +146,13 @@ public sealed class Game1 : Game
                 else if (Hit(point, 320)) { SaveCurrentRun(); paused = false; run.SetPaused(false); screens.Show("StartMenu"); } break;
             case "GameOver":
                 if (Hit(point, 300)) screens.Show("Store");
-                else if (Hit(point, 370)) { run.StartNewRun(1, run.State.RunBits); screens.Show("Game"); }
+                else if (Hit(point, 370)) { run.StartNewRun(1, run.State.RunBits); gameOverCounted = false; screens.Show("Game"); }
                 else if (Hit(point, 440)) { SaveCurrentRun(); screens.Show("StartMenu"); } break;
             case "Store": HandleStoreClick(point); break;
+            case "Game":
+                if (new Rectangle(140, PadTop() + 210, 220, 42).Contains(point)) UseAutoComplete();
+                else if (new Rectangle(380, PadTop() + 210, 180, 42).Contains(point)) UseShow();
+                break;
         }
     }
 
@@ -116,6 +170,7 @@ public sealed class Game1 : Game
                 {
                     // UpgradeSystem is kept in sync through the same price/limit seam used by tests.
                     var bits = price; upgrades.TryPurchase(id, ref bits);
+                    SaveCurrentRun();
                 }
             }
             return;
@@ -123,7 +178,7 @@ public sealed class Game1 : Game
         if (Hit(point, 530))
         {
             if (run.State.Phase == GamePhase.LevelComplete) { run.StartNextLevel(); screens.Show("Game"); }
-            else { run.StartNewRun(1, run.State.RunBits); screens.Show("Game"); }
+            else { run.StartNewRun(1, run.State.RunBits); gameOverCounted = false; screens.Show("Game"); }
         }
     }
 
@@ -161,8 +216,14 @@ public sealed class Game1 : Game
         }
 
         selectedSlot = slot;
+        gameOverCounted = false;
         upgradeLevels.Clear();
         foreach (var id in Enum.GetValues<UpgradeId>()) upgradeLevels[id] = data?.UpgradeLevels.GetValueOrDefault(id) ?? 0;
+        settings = data?.Settings ?? new SettingsData();
+        statistics = new StatisticsTracker(data?.Statistics);
+        input.ResetDefaults();
+        input.ImportBindings(settings.Bindings);
+        audio.SetSfxVolume(settings.SfxVolume);
         if (data?.ActiveRun is not null) run.LoadState(data.ActiveRun);
         else run.StartNewRun(data?.UpgradeLevels.GetValueOrDefault(UpgradeId.StartingLevel) ?? 0, data?.BankedBits ?? 0m);
         SaveCurrentRun();
@@ -177,6 +238,8 @@ public sealed class Game1 : Game
         saves.Save(slot, new SaveSlotData
         {
             UpgradeLevels = new Dictionary<UpgradeId, int>(upgradeLevels),
+            Settings = settings with { Bindings = input.ExportBindings(), SfxVolume = audio.SfxVolume },
+            Statistics = statistics.Data,
             BankedBits = run.State.RunBits,
             ActiveRun = run.State
         });
@@ -220,8 +283,8 @@ public sealed class Game1 : Game
         if (saveMessage is not null) DrawText(batch, saveMessage, new Vector2(110, 465), .65f);
         DrawButton(batch, "Back", 500);
     }
-    private void DrawSettings(SpriteBatch batch) { DrawText(batch, "Settings", new Vector2(110, 48), 1.4f); for (var i = 0; i < 9; i++) DrawText(batch, $"Color {i + 1}: {DefaultKey(i)}", new Vector2(140, 105 + i * 36)); DrawText(batch, "Music Volume: 0%    SFX Volume: 100%", new Vector2(140, 445)); DrawButton(batch, "Back", 550); }
-    private void DrawLeaderboard(SpriteBatch batch) { DrawText(batch, "Leader Board", new Vector2(110, 48), 1.4f); var lines = new[] { $"Completed Sets: {run.State.ConsecutiveSets}", "Number of Game Overs: 0", "Number of Inputs: ", $"Highest Level: {run.State.CurrentLevel}", $"Total Bits Earned: {run.State.RunBits:0.0}" }; for (var i = 0; i < lines.Length; i++) DrawText(batch, lines[i], new Vector2(140, 130 + i * 54)); DrawButton(batch, "Back", 550); }
+    private void DrawSettings(SpriteBatch batch) { DrawText(batch, "Settings - click a color row, then press a key", new Vector2(110, 48), 1.0f); for (var i = 0; i < 9; i++) DrawText(batch, $"Color {i + 1}: {BindingText((ColorId)i)}", new Vector2(140, 105 + i * 36)); if (saveMessage is not null) DrawText(batch, saveMessage, new Vector2(140, 445), .65f); DrawButton(batch, "Back", 550); }
+    private void DrawLeaderboard(SpriteBatch batch) { DrawText(batch, "Leader Board", new Vector2(110, 48), 1.4f); var lines = new[] { $"Completed Sets: {statistics.Data.CompletedSets}", $"Number of Game Overs: {statistics.Data.GameOvers}", $"Number of Inputs: {statistics.Data.Inputs}", $"Highest Level: {statistics.Data.HighestLevel}", $"Total Bits Earned: {statistics.Data.TotalBitsEarned:0.0}" }; for (var i = 0; i < lines.Length; i++) DrawText(batch, lines[i], new Vector2(140, 130 + i * 54)); DrawButton(batch, "Back", 550); }
     private void DrawStore(SpriteBatch batch) { var catalog = new StoreCatalog(); var ids = Enum.GetValues<UpgradeId>(); DrawText(batch, "Store", new Vector2(110, 30), 1.4f); DrawText(batch, $"Bits: {run.State.RunBits:0.0}", new Vector2(680, 38)); for (var i = 0; i < ids.Length; i++) { var id = ids[i]; var level = upgrades.Levels.GetValueOrDefault(id); var max = catalog.MaxPurchases(id); DrawPanel(batch, new Rectangle(110, 100 + i * 38, 740, 32), new Color(51, 55, 245)); DrawText(batch, $"{id,-16} {level,2}/{max,-2}  Next: {(level < max ? $"{catalog.Price(id, level + 1):0}" : "MAX")}", new Vector2(128, 104 + i * 38), .7f); } DrawButton(batch, "Continue / New Run", 530); }
     private void DrawGameOver(SpriteBatch batch) { DrawText(batch, "Game Over", new Vector2(110, 80), 1.6f); DrawText(batch, $"Final Score: {run.State.RunBits:0.0}", new Vector2(140, 190)); DrawButton(batch, "Go To Store", 300); DrawButton(batch, "Try Again", 370); DrawButton(batch, "Quit To Menu", 440); }
     private void DrawPause(SpriteBatch batch) { DrawText(batch, "Paused", new Vector2(110, 100), 1.6f); DrawButton(batch, "Resume", 250); DrawButton(batch, "Quit To Menu", 320); }
@@ -235,15 +298,24 @@ public sealed class Game1 : Game
             var pattern = run.State.Sets[set].Colors;
             var cached = set < upgrades.Levels.GetValueOrDefault(UpgradeId.CachedMemory);
             var bound = bounds[set];
+            var memoryHighlight = run.State.Phase == GamePhase.ShowingPattern && memorySequence.CurrentIndex / GameBalance.ColorsPerSet == set;
             for (var c = 0; c < pattern.Count; c++)
             {
-                var visible = run.State.Phase == GamePhase.ShowingPattern || run.State.PatternRevealed || cached || (set < run.State.CurrentSet && run.State.Phase == GamePhase.WaitingForInput);
+                if (memoryHighlight && memorySequence.CurrentIndex % GameBalance.ColorsPerSet == c)
+                    batch.Draw(colorTextures[7], new Rectangle(bound.X + c * 18 - 2, bound.Y - 2, 18, 32), Color.White * .35f);
+                // QA sprint 3: accepted input stays visible in the memory row while the
+                // unanswered suffix remains hidden.
+                var visible = run.State.Phase == GamePhase.ShowingPattern || run.State.PatternRevealed || cached || (set == run.State.CurrentSet && c < run.State.AcceptedPrefix.Count) || (set < run.State.CurrentSet && run.State.Phase == GamePhase.WaitingForInput);
                 var color = visible ? Palette[(int)pattern[c]] : new Color(20, 30, 40);
                 batch.Draw(colorTextures[(int)pattern[c]], new Rectangle(bound.X + c * 18, bound.Y, 14, 28), color * (cached && run.State.Phase == GamePhase.WaitingForInput ? .35f : 1f));
             }
             if (set % 3 < 2 && set < run.State.Sets.Count - 1) DrawText(batch, "*", new Vector2(bound.Right + 7, bound.Y - 2), .7f);
         }
-        for (var i = 0; i < 9; i++) { var button = new Rectangle(GraphicsDevice.Viewport.Width / 2 - 150 + (i % 3) * 100, PadTop() + (i / 3) * 70, 60, 50); batch.Draw(colorTextures[i], button, Palette[i]); DrawText(batch, (i + 1).ToString(), new Vector2(button.X + 22, button.Y + 12), .8f); }
+        for (var i = 0; i < 9; i++) { var button = new Rectangle(GraphicsDevice.Viewport.Width / 2 - 150 + (i % 3) * 100, PadTop() + (i / 3) * 70, 60, 50); var buttonColor = highlightedButton == (ColorId)i ? Palette[i] : Palette[i] * .55f; batch.Draw(colorTextures[i], button, buttonColor); DrawText(batch, (i + 1).ToString(), new Vector2(button.X + 22, button.Y + 12), .8f); }
+        DrawPanel(batch, new Rectangle(140, PadTop() + 210, 220, 42), new Color(59, 61, 161)); DrawText(batch, "A: Auto-Complete", new Vector2(154, PadTop() + 221), .65f);
+        DrawPanel(batch, new Rectangle(380, PadTop() + 210, 180, 42), new Color(59, 61, 161)); DrawText(batch, "S: Show", new Vector2(394, PadTop() + 221), .65f);
+        var prefix = run.State.AcceptedPrefix;
+        if (prefix.Count > 0) DrawText(batch, $"Entered: {string.Join(" ", prefix.Select(color => ((int)color + 1).ToString()))}", new Vector2(40, PadTop() - 30), .7f);
     }
 
     private void DrawButton(SpriteBatch batch, string text, int y) { var rect = new Rectangle(140, y, GraphicsDevice.Viewport.Width - 280, 52); DrawPanel(batch, rect, new Color(59, 61, 161)); DrawText(batch, text, new Vector2(rect.X + 24, rect.Y + 12)); }
@@ -259,5 +331,6 @@ public sealed class Game1 : Game
         batch.DrawString(font, safeText, position + UiStyle.TextShadowOffset, UiStyle.TextShadow, 0f, Vector2.Zero, scale, SpriteEffects.None, 0f);
         batch.DrawString(font, safeText, position, UiStyle.TextForeground, 0f, Vector2.Zero, scale, SpriteEffects.None, 0f);
     }
-    private static string DefaultKey(int index) => index switch { 0 => "NumPad7 / 7", 1 => "NumPad8 / 8", 2 => "NumPad9 / 9", 3 => "NumPad4 / 4", 4 => "NumPad5 / 5", 5 => "NumPad6 / 6", 6 => "NumPad1 / 1", 7 => "NumPad2 / 2", _ => "NumPad3 / 3" };
+    private static string DefaultKey(int index) => index switch { 0 => "NumPad7 / 1", 1 => "NumPad8 / 2", 2 => "NumPad9 / 3", 3 => "NumPad4 / 4", 4 => "NumPad5 / 5", 5 => "NumPad6 / 6", 6 => "NumPad1 / 7", 7 => "NumPad2 / 8", _ => "NumPad3 / 9" };
+    private string BindingText(ColorId color) => settings.Bindings.TryGetValue(color, out var value) ? value.Replace("|", " / ") : DefaultKey((int)color);
 }
